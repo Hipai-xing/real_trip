@@ -1,0 +1,14 @@
+# 编译产物
+out/
+*.class
+
+# Python 临时
+__pycache__/
+*.pyc
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
