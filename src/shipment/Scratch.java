@@ -91,6 +91,19 @@ public final class Scratch {
         }
         System.out.printf("  旧最优 ratio>=5 OR quota<=7  预警%3d 命中%3d 精准%5.1f%% 召回%5.1f%% 净省%5d%n",
                 fl, hit, 100.0 * hit / fl, 100.0 * hit / totalRejects, hit * 90L - fl * 12L);
+
+        // 8) 控制 gap 后, 超额比是否还有独立信号(查共线性)
+        System.out.println("[分层: 新鲜gap(<0.3h) vs 陈旧gap(>=0.3h) 内部, 按 ratio>=5 拆]");
+        strata(clean, "新鲜且ratio<5", d -> d.stalenessHours() != null && d.stalenessHours() < 0.3 && d.overRatio() < 5);
+        strata(clean, "新鲜且ratio>=5", d -> d.stalenessHours() != null && d.stalenessHours() < 0.3 && d.overRatio() >= 5);
+        strata(clean, "陈旧且ratio<5", d -> d.stalenessHours() != null && d.stalenessHours() >= 0.3 && d.overRatio() < 5);
+        strata(clean, "陈旧且ratio>=5", d -> d.stalenessHours() != null && d.stalenessHours() >= 0.3 && d.overRatio() >= 5);
+    }
+
+    static void strata(List<Shipment> clean, String label, java.util.function.Predicate<Shipment> p) {
+        int n = 0, rj = 0;
+        for (Shipment d : clean) { if (p.test(d)) { n++; if (d.isRejected()) rj++; } }
+        System.out.printf("  %-16s 样本%3d 拒收%3d 拒收率%.1f%%%n", label, n, rj, n == 0 ? 0 : 100.0 * rj / n);
     }
 
     static void evalGap(List<Shipment> clean, double th, int totalRejects, long baseLoss) {
