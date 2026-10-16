@@ -14,6 +14,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.function.Predicate;
 import java.util.zip.GZIPInputStream;
 
@@ -208,6 +210,12 @@ public final class Analyzer {
         line("新鲜&ratio>=5", clean, d -> gapOf(d) >= 0 && gapOf(d) < 0.3 && d.overRatio() >= 5);
         line("陈旧&ratio<5", clean, d -> gapOf(d) >= 0.3 && d.overRatio() < 5);
         line("陈旧&ratio>=5", clean, d -> gapOf(d) >= 0.3 && d.overRatio() >= 5);
+
+        System.out.println("[gap × 园区 交互: 陈旧(gap>=0.25h) 与 新鲜 区内各自拒收率 —— 暴露华南一厂为质量型盲区]");
+        System.out.println("  陈旧区(gap>=0.25h):");
+        groupRateIf(clean, d -> gapOf(d) >= 0.25, Shipment::factoryZone);
+        System.out.println("  新鲜区(gap<0.25h)对照:");
+        groupRateIf(clean, d -> { double g = gapOf(d); return g >= 0 && g < 0.25; }, Shipment::factoryZone);
     }
 
     /** 同步陈旧度(小时); 无法计算时返回 NaN。 */
@@ -234,6 +242,22 @@ public final class Analyzer {
                         100.0 * x.getValue()[1] / x.getValue()[0]))
                 .forEach(e -> System.out.printf("  %-12s 样本%3d 收货%3d 拒收%3d 拒收率%.1f%%%n",
                         e.getKey(), e.getValue()[0], e.getValue()[0] - e.getValue()[1], e.getValue()[1],
+                        100.0 * e.getValue()[1] / e.getValue()[0]));
+    }
+
+    static void groupRateIf(List<Shipment> clean, Predicate<Shipment> base, java.util.function.Function<Shipment, String> keyFn) {
+        Map<String, int[]> g = new HashMap<>();
+        for (Shipment d : clean) {
+            if (!base.test(d)) continue;
+            int[] a = g.computeIfAbsent(keyFn.apply(d), k -> new int[2]);
+            a[0]++;
+            if (d.isRejected()) a[1]++;
+        }
+        g.entrySet().stream()
+                .sorted((x, y) -> Double.compare(100.0 * y.getValue()[1] / y.getValue()[0],
+                        100.0 * x.getValue()[1] / x.getValue()[0]))
+                .forEach(e -> System.out.printf("      %-10s 样本%3d 拒收%3d 拒收率%.1f%%%n",
+                        e.getKey(), e.getValue()[0], e.getValue()[1],
                         100.0 * e.getValue()[1] / e.getValue()[0]));
     }
 
@@ -279,7 +303,20 @@ public final class Analyzer {
             Rule cur = score(clean, p, nm, totalRejects, baselineLoss);
             if (best == null || cur.netSaved > best.netSaved) best = cur;
         }
-        System.out.printf("  ★最优组合: %-30s 预警%3d 命中%3d 精准率%5.1f%% 召回%5.1f%% 净省%5d 工时(降幅%.1f%%)%n",
+        // 规则D: (gap>=g) 且 园区≠豁免 —— 剔除 gap 救不了的质量型园区以提升精准率
+        System.out.println("[规则D] (gap>=g) 且 园区≠豁免 —— 剔除 gap 救不了的质量型园区（提升精准率）:");
+        Set<String> dzones = new TreeSet<>();
+        for (Shipment d : clean) dzones.add(d.factoryZone());
+        for (double g : new double[]{0.2, 0.25, 0.3}) {
+            final double gg = g;
+            for (String z : dzones) {
+                final String zz = z;
+                Predicate<Shipment> p = d -> gapOf(d) >= gg && !zz.equals(d.factoryZone());
+                Rule cur = score(clean, p, "gap>=" + fmt(gg) + "h且≠" + zz, totalRejects, baselineLoss);
+                if (cur.netSaved > best.netSaved) best = cur;
+            }
+        }
+        System.out.printf("  ★最优规则: %-30s 预警%3d 命中%3d 精准率%5.1f%% 召回%5.1f%% 净省%5d 工时(降幅%.1f%%)%n",
                 best.name, best.flagged, best.hit, best.precision * 100, best.recall * 100,
                 best.netSaved, 100.0 * best.netSaved / baselineLoss);
     }
