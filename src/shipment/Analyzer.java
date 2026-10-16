@@ -195,6 +195,25 @@ public final class Analyzer {
         groupRate(clean, Shipment::factoryZone);
         System.out.println("[按 物料 material_group]");
         groupRate(clean, Shipment::materialGroup);
+
+        System.out.println("[按 同步→到货 时间差 gap(小时) —— 控制后才是主导信号; gap = check_in - last_sync]");
+        double[][] gb = {{0, 0.1}, {0.1, 0.3}, {0.3, 0.5}, {0.5, 0.8}, {0.8, Double.MAX_VALUE}};
+        String[] gl = {"[0,0.1)", "[0.1,0.3)", "[0.3,0.5)", "[0.5,0.8)", ">=0.8"};
+        for (int i = 0; i < gl.length; i++) {
+            final double lo = gb[i][0], hi = gb[i][1];
+            line(gl[i] + "h", clean, d -> { double g = gapOf(d); return !Double.isNaN(g) && g >= lo && g < hi; });
+        }
+        System.out.println("[分层去共线: 先按 gap 分新鲜(<0.3h)/陈旧(>=0.3h), 层内再按 ratio>=5 拆 —— 证明超额比多为 gap 的代理]");
+        line("新鲜&ratio<5", clean, d -> gapOf(d) < 0.3 && d.overRatio() < 5);
+        line("新鲜&ratio>=5", clean, d -> gapOf(d) >= 0 && gapOf(d) < 0.3 && d.overRatio() >= 5);
+        line("陈旧&ratio<5", clean, d -> gapOf(d) >= 0.3 && d.overRatio() < 5);
+        line("陈旧&ratio>=5", clean, d -> gapOf(d) >= 0.3 && d.overRatio() >= 5);
+    }
+
+    /** 同步陈旧度(小时); 无法计算时返回 NaN。 */
+    static double gapOf(Shipment d) {
+        Double g = d.stalenessHours();
+        return g == null ? Double.NaN : g;
     }
 
     static void line(String label, List<Shipment> clean, Predicate<Shipment> p) {
@@ -225,10 +244,11 @@ public final class Analyzer {
 
     // ---------- 规则寻优 ----------
     static void ruleOptimization(List<Shipment> clean, int totalRejects, long baselineLoss) {
-        System.out.println("\n===== 拦截规则寻优 (净省工时 = 命中拒收*90 - 拦截数*12) =====");
+        System.out.println("\n===== 预警规则寻优 (净省工时 = 命中拒收*90 - 预警数*12) =====");
         System.out.println("[规则A] 仅用超额比阈值:");
         for (double th : new double[]{2, 3, 4, 5, 6, 8, 10}) {
-            eval(clean, d -> d.overRatio() >= th, "ratio>=" + fmt(th), totalRejects, baselineLoss);
+            final double t = th;
+            eval(clean, d -> d.overRatio() >= t, "ratio>=" + fmt(t), totalRejects, baselineLoss);
         }
         System.out.println("[规则B] 仅用低配额阈值:");
         for (int k = 1; k <= 5; k++) {
@@ -236,30 +256,42 @@ public final class Analyzer {
             eval(clean, d -> d.quotaRemaining() != null && d.quotaRemaining() <= kk,
                     "quota<=" + kk, totalRejects, baselineLoss);
         }
-
-        // 网格搜索: ratio>=r OR quota<=q
-        System.out.println("[网格搜索] flag = (ratio>=r) OR (quota<=q):");
-        Rule best = null;
-        for (double r = 2; r <= 10; r += 0.5) {
-            for (int q = 0; q <= 8; q++) {
-                final double rr = r; final int qq = q;
-                Predicate<Shipment> p = q == 0
-                        ? (d -> d.overRatio() >= rr)
-                        : (d -> d.overRatio() >= rr || (d.quotaRemaining() != null && d.quotaRemaining() <= qq));
-                Rule cur = score(clean, p, String.format("ratio>=%s OR quota<=%d", fmt(rr), qq),
-                        totalRejects, baselineLoss);
-                if (best == null || cur.netSaved > best.netSaved) best = cur;
-            }
+        System.out.println("[规则C] 仅用同步陈旧度 gap 阈值:");
+        for (double th : new double[]{0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6}) {
+            final double t = th;
+            eval(clean, d -> gapOf(d) >= t, "gap>=" + fmt(t) + "h", totalRejects, baselineLoss);
         }
-        System.out.printf("  ★最优组合: %-24s 拦截%3d 命中%3d 精准率%5.1f%% 召回%5.1f%% 净省%5d 工时(降幅%.1f%%)%n",
+
+        // 网格搜索: (gap>=g) OR (ratio>=r) OR (quota<=q); +∞ 表示该项关闭
+        System.out.println("[网格搜索] flag = (gap>=g) OR (ratio>=r) OR (quota<=q):");
+        double[] GS = {0.2, 0.25, 0.3, 0.35, 0.4, 0.5, Double.POSITIVE_INFINITY};
+        double[] RS = {3, 5, 6, 8, 10, Double.POSITIVE_INFINITY};
+        double[] QS = {0, 3, 5, 7, Double.POSITIVE_INFINITY};
+        Rule best = null;
+        for (double g : GS) for (double r : RS) for (double q : QS) {
+            final double gg = g, rr = r, qq = q;
+            if (Double.isInfinite(gg) && Double.isInfinite(rr) && Double.isInfinite(qq)) continue;
+            Predicate<Shipment> p = d ->
+                    (!Double.isInfinite(gg) && gapOf(d) >= gg)
+                            || (!Double.isInfinite(rr) && d.overRatio() >= rr)
+                            || (!Double.isInfinite(qq) && d.quotaRemaining() != null && d.quotaRemaining() <= qq);
+            String nm = "gap>=" + fmtOpt(gg) + "|ratio>=" + fmtOpt(rr) + "|quota<=" + fmtOpt(qq);
+            Rule cur = score(clean, p, nm, totalRejects, baselineLoss);
+            if (best == null || cur.netSaved > best.netSaved) best = cur;
+        }
+        System.out.printf("  ★最优组合: %-30s 预警%3d 命中%3d 精准率%5.1f%% 召回%5.1f%% 净省%5d 工时(降幅%.1f%%)%n",
                 best.name, best.flagged, best.hit, best.precision * 100, best.recall * 100,
                 best.netSaved, 100.0 * best.netSaved / baselineLoss);
+    }
+
+    static String fmtOpt(double v) {
+        return Double.isInfinite(v) ? "off" : fmt(v);
     }
 
     static void eval(List<Shipment> clean, Predicate<Shipment> p, String name,
                      int totalRejects, long baselineLoss) {
         Rule r = score(clean, p, name, totalRejects, baselineLoss);
-        System.out.printf("  %-24s 拦截%3d 命中%3d 精准率%5.1f%% 召回%5.1f%% 净省%5d 工时(降幅%.1f%%)%n",
+        System.out.printf("  %-24s 预警%3d 命中%3d 精准率%5.1f%% 召回%5.1f%% 净省%5d 工时(降幅%.1f%%)%n",
                 r.name, r.flagged, r.hit, r.precision * 100, r.recall * 100,
                 r.netSaved, 100.0 * r.netSaved / baselineLoss);
     }
